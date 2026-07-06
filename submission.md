@@ -100,3 +100,34 @@ Added `.distinct()` before `.all()` to collapse duplicate rows back to one per s
 ```
 
 The `outerjoin` itself can remain — it's harmless once deduplication is applied, and removing it would require restructuring the query. `Song.to_dict()` already loads tags via the `tags` relationship (defined as `lazy="subquery"` on the model), so tag data in the response is unaffected by this change. All five `test_search.py` tests pass.
+
+---
+
+## Issue 4 — I got notified when a friend added my song to a playlist but not when they rated it
+
+### How I reproduced it
+
+With seed data loaded, have one user rate a song shared by another user via `POST /songs/<song_id>/rate`. Then check the sharer's notifications via `GET /users/<sharer_id>/notifications`. No notification appears. By contrast, adding that same song to a playlist via `POST /playlists/<id>/songs` does produce a notification for the sharer.
+
+### How I found the root cause
+
+Both rating and playlist-add flow through `services/notification_service.py` — `rate_song()` and `add_to_playlist()` respectively. Reading `add_to_playlist()` shows it explicitly calls `create_notification()` for the song's sharer at the end. Reading `rate_song()` shows it saves the rating and commits, then returns — with no notification call at all.
+
+### The root cause
+
+`rate_song()` was never wired up to call `create_notification()`. The notification infrastructure existed and was working correctly; the call was simply absent from `rate_song()`. This is a missing feature path, not a logic error — the rating saves correctly, but the side-effect notification that should accompany it was never written.
+
+### Fix and side-effect check
+
+Added a `create_notification()` call inside `rate_song()` after the commit, mirroring the pattern in `add_to_playlist()`. The guard `song.shared_by != user_id` ensures users don't notify themselves when rating their own shared songs:
+
+```python
+if song.shared_by != user_id:
+    create_notification(
+        user_id=song.shared_by,
+        notification_type="song_rated",
+        body=f"{rater.username} rated your song '{song.title}' {score}/5.",
+    )
+```
+
+The notification fires on both new ratings and re-ratings (score updates), since both are meaningful actions. `create_notification()` is self-contained and has no side effects beyond writing the `Notification` row. Ran the full test suite — all previously passing tests continue to pass.
