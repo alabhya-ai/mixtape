@@ -131,3 +131,35 @@ if song.shared_by != user_id:
 ```
 
 The notification fires on both new ratings and re-ratings (score updates), since both are meaningful actions. `create_notification()` is self-contained and has no side effects beyond writing the `Notification` row. Ran the full test suite — all previously passing tests continue to pass.
+
+---
+
+## Issue 5 — The last song in a playlist never shows up
+
+### How I reproduced it
+
+With seed data loaded, add 5 songs to a playlist then call `GET /playlists/<id>/songs`. Only 4 songs are returned — the last one (highest position) is always missing. The count in the response also reflects the truncated list.
+
+### How I found the root cause
+
+`get_playlist_songs()` in `services/playlist_service.py` queries songs ordered by position, then returns the result. The return statement was:
+
+```python
+return [song.to_dict() for song in songs[:-1]]
+```
+
+The `[:-1]` slice immediately stood out — it's Python's "all items except the last" slice, applied to the ordered query results. There's no domain reason to exclude the final song; it's a straightforward off-by-one error in the return value.
+
+### The root cause
+
+`songs[:-1]` slices off the last element of the list. Since songs are ordered ascending by position, the last element is always the song with the highest position number — i.e., the most recently added song in the playlist. Every playlist call silently drops it. An empty playlist returns an empty list (no element to slice off), which is why `test_empty_playlist_returns_empty_list` passed despite the bug.
+
+### Fix and side-effect check
+
+Removed the slice, returning the full list:
+
+```python
+return [song.to_dict() for song in songs]
+```
+
+No other code in the service or routes modifies the returned list. The ordering logic (ascending by `position`) and the playlist existence check are both unchanged. All 13 tests across the full suite now pass.
