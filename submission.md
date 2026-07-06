@@ -2,6 +2,94 @@
 
 ---
 
+## AI Usage
+
+I used Claude Code for codebase navigation and initial orientation — specifically to trace the call chain from routes through services and understand how models related to each other (e.g. how `ListeningEvent` connects the feed, streak, and notification flows). This saved time that would otherwise go to reading every file top to bottom.
+
+For each bug, the AI flagged likely suspects during the read-through — the Sunday guard in `streak_service.py`, the `songs[:-1]` slice, the missing `RECENT_THRESHOLD` value, and the absent notification call in `rate_song()` were all surfaced before I ran any tests. I verified each by reading the relevant test cases and confirming the failure mode matched the diagnosis before making any change. In all five cases the AI's read was correct; no fixes were overridden or rolled back.
+
+---
+
+## Codebase Map
+
+**Mixtape** is a Flask REST API for a social music-sharing platform. It uses SQLAlchemy with SQLite (`instance/mixtape.db`). Users are identified by passing a `user_id` in request bodies — there is no authentication layer.
+
+### File Structure
+
+```
+app.py              — Flask app factory, DB init, blueprint registration
+models.py           — All SQLAlchemy models
+seed_data.py        — Script to populate the DB with test data
+requirements.txt    — Flask, SQLAlchemy, pytest, python-dotenv
+
+routes/             — Thin HTTP layer (blueprints)
+  songs.py          — /songs/*
+  playlists.py      — /playlists/*
+  users.py          — /users/*
+  feed.py           — /feed/*
+
+services/           — Business logic
+  search_service.py      — Song search by title/artist
+  streak_service.py      — Listening streak tracking
+  playlist_service.py    — Playlist CRUD
+  notification_service.py — Ratings + playlist-add notifications
+  feed_service.py        — Friends activity feed
+
+tests/
+  test_streaks.py
+  test_search.py
+  test_playlists.py
+```
+
+### Data Models
+
+| Model | Key fields |
+|---|---|
+| `User` | username, email, `listening_streak`, `last_listened_at` |
+| `Song` | title, artist, album, genre, `shared_by` (FK→User), tags |
+| `Tag` | name (many-to-many with Song via `song_tags`) |
+| `Playlist` | name, `created_by`, `is_collaborative`, songs (ordered by `position`) |
+| `ListeningEvent` | user_id, song_id, `listened_at` |
+| `Rating` | user_id, song_id, score (1–5), unique per user+song |
+| `Notification` | user_id, type, body, `read` flag |
+| `friendships` | symmetric many-to-many on User |
+
+### API Endpoints
+
+| Route | Description |
+|---|---|
+| `GET /songs/search?q=` | Search by title or artist |
+| `GET /songs/<id>` | Get song detail |
+| `POST /songs/<id>/rate` | Rate a song (1–5) |
+| `POST /songs/<id>/listen` | Record a listen + update streak |
+| `POST /playlists/` | Create a playlist |
+| `GET /playlists/<id>` | Get playlist metadata |
+| `GET /playlists/<id>/songs` | Get ordered songs in playlist |
+| `POST /playlists/<id>/songs` | Add a song (notifies original sharer) |
+| `GET /users/<id>` | Get user profile |
+| `GET /users/<id>/streak` | Get current listening streak |
+| `GET /users/<id>/notifications` | Get notifications (`?unread_only=true`) |
+| `POST /users/notifications/<id>/read` | Mark notification read |
+| `GET /feed/<id>/listening-now` | Friends active in last 10 minutes |
+| `GET /feed/<id>/activity` | Recent friend listening history (limit 20) |
+
+### How a listen flows through the system
+
+```
+POST /songs/<id>/listen
+  → record_listening_event()       [streak_service]
+      → ListeningEvent row saved
+      → update_listening_streak()
+
+GET /feed/<id>/listening-now
+  → get_friends_listening_now()    [feed_service]
+      → queries ListeningEvent for friends within threshold → returns feed
+```
+
+The feed is pull-based — nothing is pushed when a listen is recorded. The `ListeningEvent` table is the shared link between the two halves.
+
+---
+
 ## Issue 1 — My listening streak keeps resetting
 
 ### How I reproduced it
@@ -163,3 +251,17 @@ return [song.to_dict() for song in songs]
 ```
 
 No other code in the service or routes modifies the returned list. The ordering logic (ascending by `position`) and the playlist existence check are both unchanged. All 13 tests across the full suite now pass.
+
+---
+
+## Git Log
+
+```
+9c76da1 fix: return all playlist songs instead of slicing off the last one
+561259f fix: send notification to song sharer when their song is rated
+533331e fix: deduplicate search results for songs with multiple tags
+d6c9a71 fix: reduce listening-now threshold from 24 hours to 10 minutes
+55abb74 fix: fixed Issue 1
+2dfdeaa Add .gitignore file and update README with setup instructions
+7b64551 initial commit
+```
