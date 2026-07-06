@@ -32,3 +32,35 @@ elif days_since_last == 1:
 ```
 
 This makes Sunday behave identically to every other day. The `days_since_last == 0` (same-day no-op) and `else` (gap reset) branches are unchanged and unaffected. Ran all five tests in `tests/test_streaks.py` — all pass, including the pre-existing Saturday → Sunday regression case.
+
+---
+
+## Issue 2 — Friends Listening Now shows people from yesterday
+
+### How I reproduced it
+
+With seed data loaded, record a `ListeningEvent` for a friend with a timestamp from 23 hours ago, then call `GET /feed/<user_id>/listening-now`. The friend appears in the feed despite not having listened recently. Any event within the past 24 hours would show up, meaning someone who listened yesterday evening still appears as "listening now" the following morning.
+
+### How I found the root cause
+
+The feed endpoint calls `get_friends_listening_now()` in `services/feed_service.py`. That function filters events against a `cutoff` computed as `datetime.now(timezone.utc) - RECENT_THRESHOLD`. The threshold was defined at the top of the file:
+
+```python
+RECENT_THRESHOLD = timedelta(hours=24)
+```
+
+A 24-hour window for "listening now" is far too wide — it's the same window used by the activity feed. The constant name `RECENT_THRESHOLD` and the feature name "Listening Now" both imply a short, present-tense window. 24 hours is not that.
+
+### The root cause
+
+`RECENT_THRESHOLD` was set to `timedelta(hours=24)`, meaning any friend who listened within the past 24 hours qualified as "listening now." A user who listened at 10pm last night would still appear in the feed at 9pm the following day. The filtering logic itself is correct — it was only the threshold value that was wrong.
+
+### Fix and side-effect check
+
+Changed the threshold to 10 minutes:
+
+```python
+RECENT_THRESHOLD = timedelta(minutes=10)
+```
+
+This constant is used only in `get_friends_listening_now()` — `get_activity_feed()` has no recency filter and is unaffected. Ran the full test suite after the change; all previously passing tests continue to pass.
