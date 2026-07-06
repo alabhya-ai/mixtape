@@ -64,3 +64,39 @@ RECENT_THRESHOLD = timedelta(minutes=10)
 ```
 
 This constant is used only in `get_friends_listening_now()` — `get_activity_feed()` has no recency filter and is unaffected. Ran the full test suite after the change; all previously passing tests continue to pass.
+
+---
+
+## Issue 3 — The same song keeps showing up twice in search
+
+### How I reproduced it
+
+With seed data loaded, search for a song that has multiple tags — e.g. `GET /songs/search?q=Crown+Heights`. The same song appears three times in the response (once per tag). A song with one tag appears once; a song with no tags appears once. The duplication scales directly with tag count.
+
+### How I found the root cause
+
+`search_songs()` in `services/search_service.py` is the only code path for song search. The query does an `outerjoin` on the `song_tags` association table to enable tag-based filtering:
+
+```python
+db.session.query(Song)
+    .outerjoin(song_tags, Song.id == song_tags.c.song_id)
+    .filter(...)
+    .all()
+```
+
+A join against an association table multiplies rows — one result row per matching join row. A song with 3 tags produces 3 join rows and therefore 3 entries in `.all()`. The filter only checks title/artist, not tags, so the join serves no filtering purpose here — it's purely an artifact that causes the duplication.
+
+### The root cause
+
+The `outerjoin` on `song_tags` was left in the query without a corresponding `.distinct()`. SQLAlchemy returns one `Song` object per result row, not one per unique song. For a song with N tags, the join produces N rows, so the song appears N times in the returned list. Songs with no tags produce a single NULL-joined row and appear once, which is why tagless songs were unaffected.
+
+### Fix and side-effect check
+
+Added `.distinct()` before `.all()` to collapse duplicate rows back to one per song:
+
+```python
+.distinct()
+.all()
+```
+
+The `outerjoin` itself can remain — it's harmless once deduplication is applied, and removing it would require restructuring the query. `Song.to_dict()` already loads tags via the `tags` relationship (defined as `lazy="subquery"` on the model), so tag data in the response is unaffected by this change. All five `test_search.py` tests pass.
